@@ -1,21 +1,23 @@
 /*
 ========================================================
-GitHub Advanced Search CLI PRO v3
+GitHub Advanced Search CLI PRO v4
 Language : C++
 Library  : libcurl + nlohmann/json
 
-FEATURES:
-- Only repository name is required
-- All other filters optional
-- Pretty formatted output
+UPGRADE v4:
+- Better stable version
+- Proper min/max repo size filter
+- Multiple topics support
+- Better formatted output
+- Input validation
+- Retry-safe curl setup
+- Timeout handling
 - Total repository count
-- Cleaner terminal UX
-- GitHub Search API
-- Better for portfolio project
+- Clean terminal UX
+- Optional sort/order
+- Only repository name required
 
 INSTALL:
-
-Ubuntu:
 sudo apt install libcurl4-openssl-dev
 sudo apt install nlohmann-json3-dev
 
@@ -29,6 +31,9 @@ RUN:
 
 #include <iostream>
 #include <string>
+#include <vector>
+#include <sstream>
+#include <iomanip>
 #include <curl/curl.h>
 #include <nlohmann/json.hpp>
 
@@ -50,13 +55,26 @@ size_t WriteCallback(void* contents, size_t size, size_t nmemb, string* output)
 
 /*
 ========================================================
-HELPER
+HELPERS
 ========================================================
 */
 
 void line()
 {
-    cout << "====================================================\n";
+    cout << "============================================================\n";
+}
+
+bool isNumber(const string& s)
+{
+    if (s.empty()) return false;
+
+    for (char c : s)
+    {
+        if (!isdigit(c))
+            return false;
+    }
+
+    return true;
 }
 
 string encodeQuery(const string& str)
@@ -74,11 +92,71 @@ string encodeQuery(const string& str)
     return result;
 }
 
+vector<string> splitTopics(const string& input)
+{
+    vector<string> topics;
+    string word;
+    stringstream ss(input);
+
+    while (ss >> word)
+    {
+        topics.push_back(word);
+    }
+
+    return topics;
+}
+
 /*
 ========================================================
-PRETTY PRINT RESULT
+PRETTY PRINT
 ========================================================
 */
+
+void printRepo(const json& repo, int index)
+{
+    cout << "[" << index << "] "
+         << repo.value("name", "N/A")
+         << "\n\n";
+
+    cout << left << setw(15) << "Language"
+         << ": "
+         << repo.value("language", "N/A")
+         << "\n";
+
+    cout << left << setw(15) << "Stars"
+         << ": "
+         << repo.value("stargazers_count", 0)
+         << "\n";
+
+    cout << left << setw(15) << "Forks"
+         << ": "
+         << repo.value("forks_count", 0)
+         << "\n";
+
+    cout << left << setw(15) << "Size"
+         << ": "
+         << repo.value("size", 0)
+         << " KB\n";
+
+    cout << left << setw(15) << "Updated"
+         << ": "
+         << repo.value("updated_at", "N/A")
+         << "\n";
+
+    cout << left << setw(15) << "URL"
+         << ": "
+         << repo.value("html_url", "N/A")
+         << "\n";
+
+    cout << "\nDescription:\n";
+
+    if (repo["description"].is_null())
+        cout << "No description\n";
+    else
+        cout << repo.value("description", "No description") << "\n";
+
+    cout << "\n------------------------------------------------------------\n\n";
+}
 
 void printResults(const string& response)
 {
@@ -86,9 +164,6 @@ void printResults(const string& response)
     {
         json data = json::parse(response);
 
-        /*
-        GitHub validation error
-        */
         if (data.contains("message") &&
             data["message"] == "Validation Failed")
         {
@@ -99,14 +174,24 @@ void printResults(const string& response)
             return;
         }
 
-        int total = data["total_count"];
+        if (data.contains("message") &&
+            data["message"] == "API rate limit exceeded")
+        {
+            line();
+            cout << "GitHub API Rate Limit Exceeded\n";
+            line();
+            cout << "Gunakan GitHub Token di versi berikutnya.\n";
+            return;
+        }
+
+        int total = data.value("total_count", 0);
 
         line();
         cout << "Total Repository Found : " << total << "\n";
         line();
         cout << "\n";
 
-        if (data["items"].empty())
+        if (!data.contains("items") || data["items"].empty())
         {
             cout << "No repositories found.\n";
             return;
@@ -114,37 +199,9 @@ void printResults(const string& response)
 
         int index = 1;
 
-        for (auto& repo : data["items"])
+        for (const auto& repo : data["items"])
         {
-            cout << "[" << index++ << "] "
-                 << repo.value("name", "N/A") << "\n\n";
-
-            cout << "Language    : "
-                 << repo.value("language", "N/A") << "\n";
-
-            cout << "Stars       : "
-                 << repo.value("stargazers_count", 0) << "\n";
-
-            cout << "Forks       : "
-                 << repo.value("forks_count", 0) << "\n";
-
-            cout << "Size        : "
-                 << repo.value("size", 0) << " KB\n";
-
-            cout << "Updated     : "
-                 << repo.value("updated_at", "N/A") << "\n";
-
-            cout << "URL         : "
-                 << repo.value("html_url", "N/A") << "\n";
-
-            cout << "\nDescription :\n";
-
-            if (repo["description"].is_null())
-                cout << "No description\n";
-            else
-                cout << repo["description"] << "\n";
-
-            cout << "\n----------------------------------------------------\n\n";
+            printRepo(repo, index++);
         }
     }
     catch (exception& e)
@@ -168,14 +225,15 @@ int main()
     string language;
     string stars;
     string forks;
-    string size;
-    string topic;
+    string minSize;
+    string maxSize;
+    string topicInput;
     string updated;
     string sort;
     string order;
 
     line();
-    cout << "        GitHub Advanced Search CLI PRO v3\n";
+    cout << "        GitHub Advanced Search CLI PRO v4\n";
     line();
     cout << "\n";
 
@@ -201,20 +259,51 @@ int main()
     cout << "[4] Minimum Forks (optional | number only): ";
     getline(cin, forks);
 
-    cout << "[5] Repository Size KB (optional | ex: 30): ";
-    getline(cin, size);
+    cout << "[5] Min Repo Size KB (optional | ex: 1): ";
+    getline(cin, minSize);
 
-    cout << "[6] Topic (optional | without #): ";
-    getline(cin, topic);
+    cout << "[6] Max Repo Size KB (optional | ex: 100): ";
+    getline(cin, maxSize);
 
-    cout << "[7] Updated After (optional | YYYY-MM-DD): ";
+    cout << "[7] Topics (optional | ex: compiler interpreter): ";
+    getline(cin, topicInput);
+
+    cout << "[8] Updated After (optional | YYYY-MM-DD): ";
     getline(cin, updated);
 
-    cout << "[8] Sort (optional | stars/forks/updated): ";
+    cout << "[9] Sort (optional | stars/forks/updated): ";
     getline(cin, sort);
 
-    cout << "[9] Order (optional | desc/asc): ";
+    cout << "[10] Order (optional | desc/asc): ";
     getline(cin, order);
+
+    /*
+    BASIC VALIDATION
+    */
+
+    if (!stars.empty() && !isNumber(stars))
+    {
+        cout << "\n[ERROR] Stars harus angka.\n";
+        return 1;
+    }
+
+    if (!forks.empty() && !isNumber(forks))
+    {
+        cout << "\n[ERROR] Forks harus angka.\n";
+        return 1;
+    }
+
+    if (!minSize.empty() && !isNumber(minSize))
+    {
+        cout << "\n[ERROR] Min size harus angka.\n";
+        return 1;
+    }
+
+    if (!maxSize.empty() && !isNumber(maxSize))
+    {
+        cout << "\n[ERROR] Max size harus angka.\n";
+        return 1;
+    }
 
     /*
     BUILD QUERY
@@ -231,11 +320,33 @@ int main()
     if (!forks.empty())
         query += "+forks:>=" + forks;
 
-    if (!size.empty())
-        query += "+size:>=" + size;
+    /*
+    Proper size range
+    */
 
-    if (!topic.empty())
+    if (!minSize.empty() && !maxSize.empty())
+    {
+        query += "+size:" + minSize + ".." + maxSize;
+    }
+    else if (!minSize.empty())
+    {
+        query += "+size:>=" + minSize;
+    }
+    else if (!maxSize.empty())
+    {
+        query += "+size:<=" + maxSize;
+    }
+
+    /*
+    Multi topic support
+    */
+
+    vector<string> topics = splitTopics(topicInput);
+
+    for (const auto& topic : topics)
+    {
         query += "+topic:" + topic;
+    }
 
     if (!updated.empty())
         query += "+pushed:>=" + updated;
@@ -286,8 +397,11 @@ int main()
     curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
 
     /*
-    FETCH
+    stability improvements
     */
+
+    curl_easy_setopt(curl, CURLOPT_TIMEOUT, 15L);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 
     cout << "\n";
     line();
@@ -301,7 +415,7 @@ int main()
     {
         cerr << "[CURL ERROR] "
              << curl_easy_strerror(res)
-             << endl;
+             << "\n";
     }
     else
     {
