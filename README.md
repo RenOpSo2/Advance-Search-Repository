@@ -328,7 +328,7 @@ Planned improvements:
 
 License
 
-MIT License
+GPL License
 
 ---
 
